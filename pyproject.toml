@@ -1,0 +1,26 @@
+[project]
+name = "devtask"
+version = "0.1.0"
+description = "Let an agent plan and prepare a change, then write the code yourself."
+readme = "README.md"
+license = "MIT"
+authors = [{ name = "Joshua Ferguson" }]
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+devtask = "devtask.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.11,<0.12"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "git-cliff>=2.14.2",
+    "ruff>=0.16.10",
+    "ty>=0.0.85",
+]
+
+[tool.ruff]
+line-length = 100

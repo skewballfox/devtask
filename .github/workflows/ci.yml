@@ -1,0 +1,81 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Check (Python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The oldest Python devtask supports and the newest.
+        python: ["3.11", "3.14"]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # the release preview needs the tags and history
+
+      - uses: astral-sh/setup-uv@v10
+        with:
+          python-version: ${{ matrix.python }}
+
+      - run: uv sync --locked
+
+      - name: Lint
+        run: |
+          uv run ruff check
+          uv run ruff format --check
+
+      - name: Type-check
+        run: uv run ty check src hooks scripts
+
+      - name: Check the plugin and package versions match
+        run: |
+          plugin=$(jq -r .version .claude-plugin/plugin.json)
+          package=$(uv version --short)
+          if [ "$plugin" != "$package" ]; then
+            echo "::error::plugin.json says $plugin but pyproject.toml says $package"
+            exit 1
+          fi
+
+      - name: Smoke-test the CLI, git hook and Claude guard
+        run: |
+          export PATH="$GITHUB_WORKSPACE/.venv/bin:$PATH"
+          export HOME="$RUNNER_TEMP/home" GIT_CONFIG_GLOBAL="$RUNNER_TEMP/gitconfig"
+          mkdir -p "$HOME"
+          git config --global user.name ci
+          git config --global user.email ci@example.com
+
+          repo="$RUNNER_TEMP/repo"
+          git init -q "$repo" && cd "$repo"
+          echo 'fn main() {}' > main.rs
+          git add main.rs && git commit -qm init
+
+          devtask init
+          devtask completions fish > /dev/null
+          git config --global --get hook.devtask-pre-commit.command
+
+          printf '// #DEVTASK_ci-1\nfn main() {}\n' > main.rs
+          git add main.rs
+          if devtask git-hook pre-commit; then
+            echo "::error::the pre-commit check let a tag through"
+            exit 1
+          fi
+
+          # The plugin runs the guard with the system python3, so test it that way.
+          input=$(jq -n --arg cwd "$repo" \
+            '{tool_name: "Write", cwd: $cwd, tool_input: {file_path: "main.rs", content: "x"}}')
+          echo "$input" | python3 "$GITHUB_WORKSPACE/hooks/guard.py" pre-tool-use \
+            | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
+
+      - name: Preview the next release
+        if: matrix.python == '3.14'
+        run: uv run scripts/next_version.py --github

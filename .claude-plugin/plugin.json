@@ -1,0 +1,10 @@
+{
+  "name": "devtask",
+  "version": "0.1.0",
+  "description": "Let an agent plan and prepare a change, then write the code yourself.",
+  "author": {
+    "name": "Joshua Ferguson"
+  },
+  "license": "MIT",
+  "keywords": ["planning", "code-review", "onboarding", "socratic", "no-llm-code"]
+}

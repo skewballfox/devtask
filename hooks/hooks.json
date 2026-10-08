@@ -1,0 +1,28 @@
+{
+  "description": "In repos where `devtask init` turned the guard on, limits Claude's edits to adding or removing devtask tag lines and tells it so at session start.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/guard.py\" session-start",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Edit|MultiEdit|Write|NotebookEdit|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/guard.py\" pre-tool-use",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

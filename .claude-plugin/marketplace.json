@@ -1,0 +1,14 @@
+{
+  "name": "devtask",
+  "description": "Local marketplace for the devtask plugin.",
+  "owner": {
+    "name": "Joshua Ferguson"
+  },
+  "plugins": [
+    {
+      "name": "devtask",
+      "description": "Let an agent plan and prepare a change, then write the code yourself.",
+      "source": "./"
+    }
+  ]
+}
