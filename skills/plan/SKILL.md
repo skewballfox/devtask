@@ -63,17 +63,27 @@ heading must contain the tag:
 ```markdown
 ## #DEVTASK_pr1234-1: Thread the timeout through the client builder
 
-**Where:** src/client/builder.rs, `ClientBuilder::build`
+**Where:** src/client/builder.rs, `ClientBuilder.build`
 **What:** ...
 **Why:** ...
 **Questions:** ...
 **Done when:** ...
 ```
 
-- **What:** describe the change in prose. Name existing functions, types
-  and patterns to follow, with `file:line` references. Signatures and
-  identifiers are fine; ready-to-paste implementation code is not. If the
-  user could copy it into the file, it is too much.
+- **What:** describe the change in prose. The user reads it as a reference
+  and then writes their own implementation, so it must never contain code
+  meant to go into the file, not even a new signature or a one-liner.
+  Describe new parameters, fields and return values in words instead.
+  - Name things the same way in every language: `Object` for a type or
+    data structure, and `Object.method` for a method (`ClientBuilder.build`,
+    not `ClientBuilder::build` or `builder.build()`). Add `file:line` so
+    the user can find them.
+  - You may quote existing code, from this repository or from upstream
+    (a dependency's source, the project's docs), when it shows a pattern
+    to follow. Copy it as it is and say where it comes from. Don't adapt
+    it to this change; an adapted example is the answer.
+  - Test: if the user could paste any of it into the file and be closer
+    to done, rewrite it as prose.
 - **Why:** connect this spot to the goal and to the other tags.
 - **Questions:** Socratic prompts that make the user reason about the
   design: edge cases, invariants, error paths, what the tests should
@@ -95,5 +105,6 @@ it until it passes.
 Then give the user a short orientation in chat: the task file path, the
 suggested order, and the one or two questions most worth thinking about
 first. Remind them that `devtask strip --task <task>` removes the tags,
-that the git hook refuses commits containing them, and that
-`/devtask:review` will check their implementation.
+that the git hook refuses commits containing them, that
+`/devtask:ask <ID>` talks through any item, and that `/devtask:review`
+will check their implementation.

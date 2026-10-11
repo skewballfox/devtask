@@ -26,6 +26,7 @@ and hints, not patches.
 | `devtask` (`src/devtask/cli.py`) | CLI that manages task files, finds tags, maps them to their sections, and strips them. It also runs as the global `pre-commit` and `pre-push` git hook, which refuses any added line containing a tag |
 | `hooks/guard.py` | Claude Code hook (logic in `src/devtask/guard.py`). In a guarded repo it denies any edit that changes more than tag-only lines |
 | `skills/plan` | `/devtask:plan <issue/PR>` explores the code, places tags, and writes the task file |
+| `skills/ask` | `/devtask:ask [tag] [question]` talks through one tag with explanations and hints, and can add notes to its section |
 | `skills/review` | `/devtask:review [task]` reviews your implementation against the plan |
 
 devtask writes nothing to the repository, including `.git/`. Its files
@@ -87,9 +88,11 @@ devtask init                    # set up this repo and turn the guard on
 claude                          # then: /devtask:plan 1234
 devtask list                    # tasks and how many tags remain
 devtask scan                    # each tag, where it is, and whether it is mapped
-devtask show pr1234-2           # where a tag is and what it asks for
+devtask show                    # every tag in the tree, where it is and what it asks for
+devtask show --task pr1234      # the same for one task (or `show pr1234-2` for one tag)
 devtask strip pr1234-2          # remove one tag (or --task pr1234, or --all)
-# ...write the code...          # then: /devtask:review pr1234
+# ...write the code...          # stuck? /devtask:ask pr1234-2 <question>
+                                # then: /devtask:review pr1234
 ```
 
 Fish completions cover every command and option. Task names and tag IDs
@@ -124,8 +127,9 @@ accepts tag-only lines, so Claude can't hide code next to a tag.
   The git hook is the backstop for tags, and the skills tell Claude not to
   write code. Neither stops an LLM-written line that you commit yourself.
 - `git commit --no-verify` and `git push --no-verify` skip the git hooks.
-- Task files describe changes in prose and must not contain ready-to-paste
-  code. That rule is in the skill instructions, and nothing enforces it.
+- Task files describe changes in prose and must not contain code meant to
+  be pasted in. Quoting existing code as an example is allowed. These rules
+  are in the skill instructions, and nothing enforces them.
 
 ## Develop and release
 

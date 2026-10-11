@@ -22,8 +22,9 @@ this skill's base directory). Read that file before you write.
 1. `devtask list` shows the tasks. `devtask scan --task <task>` shows which
    tags are still in the tree. A missing tag usually means the user started
    that item and removed it.
-2. Read the task file (`<task>.md` in the directory `devtask path` prints), or use
-   `devtask show <ID>` for one item.
+2. Read the task file (`<task>.md` in the directory `devtask path` prints).
+   `devtask show --task <task>` prints each remaining tag's location with
+   its section, and `devtask show <ID>` prints one item.
 3. Read the user's changes with `git diff` (and `git diff --cached`), or
    with `git log -p <base>..` when they have committed. Read enough of the
    surrounding code to judge it. Don't review the diff in isolation.
@@ -53,7 +54,9 @@ problems. For each one, give the
 that leads toward the fix. Then list what looks good and what is left.
 
 If the user asks for the answer outright, explain the approach in prose.
-Still don't write the code.
+Still don't write the code. Follow the plan skill's rules for **What**:
+`Object` and `Object.method` for names, and quoting existing code as an
+example is fine, but nothing the user could paste in.
 
 If they want it, append a dated `### Review` note under the relevant
 sections of the task file. Run `devtask strip <ID>` only when they ask you

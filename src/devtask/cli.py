@@ -35,8 +35,9 @@ One section per tag; the heading must contain the tag, for example:
 
     ## {prefix}{task}-1: short title
 
-    **Where:** path/to/file.rs, in `function_name`
-    **What:** the change, described in prose (no ready-to-paste code)
+    **Where:** path/to/file.rs, in `Object.method`
+    **What:** the change, described in prose for the user to implement
+              (existing code may be quoted as an example; no code to paste in)
     **Why:** the reason this spot needs it
     **Questions:** what to work out before writing it
     **Done when:** how to tell it works
@@ -123,19 +124,21 @@ def cmd_next_id(args: argparse.Namespace) -> None:
     print(f"{prefix}{args.task}-{max(nums, default=0) + 1}")
 
 
+def in_task(tag_id: str, task: str | None) -> bool:
+    """True when `tag_id` belongs to `task`, or when no task is given."""
+    return task is None or tag_id.startswith(f"{task}-")
+
+
 def cmd_scan(args: argparse.Namespace) -> None:
     repo = current_repo()
     prefix = core.tag_prefix()
     sections = core.read_sections(repo, prefix)
     line_re = core.tag_line_re(prefix)
 
-    def wanted(tag_id: str) -> bool:
-        return args.task is None or tag_id.startswith(f"{args.task}-")
-
     problems = 0
     seen = set()
     for tag_id, file, lineno, line in core.find_tags(repo.root, prefix):
-        if not wanted(tag_id):
+        if not in_task(tag_id, args.task):
             continue
         seen.add(tag_id)
         notes = []
@@ -147,24 +150,51 @@ def cmd_scan(args: argparse.Namespace) -> None:
         suffix = f"  [{', '.join(notes)}]" if notes else ""
         print(f"{prefix}{tag_id}  {file}:{lineno}{suffix}")
     for tag_id, section in sections.items():
-        if wanted(tag_id) and tag_id not in seen:
+        if in_task(tag_id, args.task) and tag_id not in seen:
             print(f"{prefix}{tag_id}  (no tag in tree; {section.task_file.name})")
     if problems:
         sys.exit(1)
 
 
 def cmd_show(args: argparse.Namespace) -> None:
+    """One tag's location and section, or, with no ID, every tag in the tree."""
     repo = current_repo()
     prefix = core.tag_prefix()
-    tag_id = args.id.removeprefix(prefix)
-    for t_id, file, lineno, _ in core.find_tags(repo.root, prefix):
-        if t_id == tag_id:
-            print(f"at {file}:{lineno}")
-    section = core.read_sections(repo, prefix).get(tag_id)
-    if section is None:
-        die(f"no task file documents {prefix}{tag_id}")
-    print(f"from {section.task_file}\n")
-    print(section.text, end="")
+    sections = core.read_sections(repo, prefix)
+    places: dict[str, list[str]] = {}
+    for tag_id, file, lineno, _ in core.find_tags(repo.root, prefix):
+        places.setdefault(tag_id, []).append(f"{file}:{lineno}")
+
+    def show(tag_id: str) -> bool:
+        for place in places.get(tag_id, []):
+            print(f"at {place}")
+        section = sections.get(tag_id)
+        if section is None:
+            print(f"{prefix}{tag_id}  [UNMAPPED: no task file documents it]")
+            return False
+        print(f"from {section.task_file}\n")
+        print(section.text, end="")
+        return True
+
+    match args.id, args.task:
+        case str(tag_id), None:
+            if not show(tag_id.removeprefix(prefix)):
+                sys.exit(1)
+        case None, task:
+            # Mapped tags in the order the task files list them, then unmapped ones.
+            ids = [i for i in sections if i in places] + [i for i in places if i not in sections]
+            ids = [i for i in ids if in_task(i, task)]
+            if not ids:
+                print(f"no {task} tags in the tree" if task else "no tags in the tree")
+            ok = True
+            for n, tag_id in enumerate(ids):
+                if n:
+                    print()
+                ok = show(tag_id) and ok
+            if not ok:
+                sys.exit(1)
+        case _:
+            die("give a tag ID or --task, not both")
 
 
 def cmd_list(_args: argparse.Namespace) -> None:
@@ -395,8 +425,9 @@ def build_parser() -> argparse.ArgumentParser:
     COMPLETE[p.add_argument("task", help="task name")] = "tasks"
     p = command("scan", "list tags in the tree against the task files")
     COMPLETE[p.add_argument("--task", help="only this task")] = "tasks"
-    p = command("show", "print where a tag is and what it asks for")
-    COMPLETE[p.add_argument("id", help="tag ID, with or without the prefix")] = "ids"
+    p = command("show", "print where tags are and what they ask for")
+    COMPLETE[p.add_argument("id", nargs="?", help="tag ID (default: all tags)")] = "ids"
+    COMPLETE[p.add_argument("--task", help="only this task's tags")] = "tasks"
     command("list", "list tasks and their progress")
     p = command("strip", "remove tag lines from the working tree")
     COMPLETE[p.add_argument("ids", nargs="*", help="tag IDs to remove")] = "ids"
