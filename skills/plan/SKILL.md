@@ -18,7 +18,8 @@ this skill's base directory). Read that file before you write.
 
 ## 1. Set up
 
-1. Run `devtask info`. If the guard is off, run `devtask init`.
+1. Run `devtask info`. If the guard is off and you haven't been told that
+   devtask mode is on for this task, run `devtask init`.
 2. Pick a short task name from the target: `pr1234`, `issue-88`, or a slug.
    Run `devtask new <task> --title "<title>"` and note the task file path it
    prints. All your notes go in that file.

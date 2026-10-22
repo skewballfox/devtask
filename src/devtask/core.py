@@ -5,12 +5,14 @@ comment holding a tag (`// #DEVTASK_pr123-1`) and described in a task file
 kept outside the repository. Nothing here writes code; it only finds,
 validates and removes tag lines and locates devtask's files.
 
-Nothing is stored in the repository. Files follow the XDG Base Directory
+Nothing is stored in the working tree; the CLI only adds its git hook
+entries to the repo's config. Other files follow the XDG Base Directory
 spec, honoring XDG_CONFIG_HOME, XDG_DATA_HOME and XDG_STATE_HOME:
 
-    $XDG_CONFIG_HOME/devtask/config.toml           settings (tag prefix)
+    $XDG_CONFIG_HOME/devtask/config.toml           global settings
+    $XDG_DATA_HOME/devtask/repos/<repo>/config.toml project settings (override global)
     $XDG_DATA_HOME/devtask/repos/<repo>/tasks/      task files
-    $XDG_STATE_HOME/devtask/repos/<repo>/           guard flag, repo info
+    $XDG_STATE_HOME/devtask/repos/<repo>/           guard flag, rolls, repo info
 """
 
 from __future__ import annotations
@@ -69,8 +71,11 @@ def state_home() -> Path:
     return xdg_base("XDG_STATE_HOME", Path.home() / ".local" / "state") / APP
 
 
-def load_config() -> dict:
-    path = config_dir() / "config.toml"
+def global_config_file() -> Path:
+    return config_dir() / "config.toml"
+
+
+def read_toml(path: Path) -> dict:
     try:
         with path.open("rb") as f:
             return tomllib.load(f)
@@ -78,8 +83,16 @@ def load_config() -> dict:
         return {}
 
 
+def load_config(repo: Repo | None = None) -> dict:
+    """The global config with the repo's project config, if any, on top."""
+    config = read_toml(global_config_file())
+    if repo is not None:
+        config |= read_toml(repo.config_file)
+    return config
+
+
 def tag_prefix() -> str:
-    """The tag prefix: `tag` in config.toml, else the default."""
+    """The tag prefix: `tag` in the global config.toml, else the default."""
     return load_config().get("tag") or DEFAULT_TAG
 
 
@@ -140,8 +153,21 @@ class Repo:
         return self.data_dir / "tasks"
 
     @property
+    def config_file(self) -> Path:
+        """Project settings, which take precedence over the global config."""
+        return self.data_dir / "config.toml"
+
+    @property
     def state_dir(self) -> Path:
         return state_home() / "repos" / self.key
+
+    @property
+    def init_marker(self) -> Path:
+        return self.state_dir / "initialized"
+
+    def initialized(self) -> bool:
+        """True once `devtask init` has run here, or the repo guard is on."""
+        return self.init_marker.exists() or self.guard_enabled()
 
     @property
     def guard_file(self) -> Path:

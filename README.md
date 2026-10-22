@@ -23,21 +23,22 @@ and hints, not patches.
 
 | Piece | What it does |
 |---|---|
-| `devtask` (`src/devtask/cli.py`) | CLI that manages task files, finds tags, maps them to their sections, and strips them. It also runs as the global `pre-commit` and `pre-push` git hook, which refuses any added line containing a tag |
-| `hooks/guard.py` | Claude Code hook (logic in `src/devtask/guard.py`). In a guarded repo it denies any edit that changes more than tag-only lines |
+| `devtask` (`src/devtask/cli.py`) | CLI that manages task files, finds tags, maps them to their sections, and strips them. It also runs as each initialized repo's `pre-commit` and `pre-push` git hook, which refuses any added line containing a tag |
+| `hooks/guard.py` | Claude Code hook (logic in `src/devtask/guard.py`). In a guarded repo or task it denies any edit that changes more than tag-only lines. It also rolls for [random devtask mode](#random-devtask-mode) |
 | `skills/plan` | `/devtask:plan <issue/PR>` explores the code, places tags, and writes the task file |
 | `skills/ask` | `/devtask:ask [tag] [question]` talks through one tag with explanations and hints, and can add notes to its section |
 | `skills/review` | `/devtask:review [task]` reviews your implementation against the plan |
 
-devtask writes nothing to the repository, including `.git/`. Its files
-follow the [XDG Base Directory spec][xdg] and honor `XDG_CONFIG_HOME`,
+devtask writes nothing to the working tree. In `.git/` it only adds its
+two git hook entries to `.git/config` (see below). Its other files follow the [XDG Base Directory spec][xdg] and honor `XDG_CONFIG_HOME`,
 `XDG_DATA_HOME` and `XDG_STATE_HOME`:
 
 | What | Where (default) |
 |---|---|
-| Settings | `~/.config/devtask/config.toml` |
+| Global settings | `~/.config/devtask/config.toml` |
+| Project settings (override global) | `~/.local/share/devtask/repos/<repo>-<hash>/config.toml` |
 | Task files | `~/.local/share/devtask/repos/<repo>-<hash>/tasks/` |
-| Guard flag, repo info | `~/.local/state/devtask/repos/<repo>-<hash>/` |
+| Guard flag, rolls, repo info | `~/.local/state/devtask/repos/<repo>-<hash>/` |
 
 All worktrees of a repository share one set of these directories. Run
 `devtask info` to see the paths in use.
@@ -50,11 +51,12 @@ devtask is a [uv][uv] project and needs Python 3.11 or newer.
 
 ```sh
 uv tool install ~/Workspace/devtask   # or `uv tool install -e .` while hacking on it
-devtask setup                         # add the global git hooks and fish completions
+devtask setup                         # add the fish completions
 ```
 
 `devtask setup` is optional: `devtask init` runs the same check first and
-installs whatever is missing or out of date. Fish completions are only
+installs whatever is missing or out of date. It also removes the global git
+hooks that versions before this one installed. Fish completions are only
 written when `fish` is on `PATH`.
 
 Then, in Claude Code:
@@ -64,12 +66,20 @@ Then, in Claude Code:
 /plugin install devtask@devtask
 ```
 
-The git hooks are [config-based hooks][hooks] (`hook.<name>.event` and
-`hook.<name>.command` in your global config), which need a git version with config-based hook support (tested with git 2.55).
-They run alongside each repository's own hooks, including Husky-style
-`core.hooksPath` setups, instead of replacing them. The hook command is the
-`devtask` found on `PATH` when they were installed. To remove them, run
-`devtask uninstall-git-hook`.
+`devtask init` adds the git hooks to that repository only. They are
+[config-based hooks][hooks]: `hook.devtask-pre-commit.*` and
+`hook.devtask-pre-push.*` entries in the repository's own config
+(`.git/config`, shared by all its worktrees). They need a git version with
+config-based hook support (tested with git 2.55 and 2.56).
+
+devtask never writes a script into `.git/hooks/` and never sets
+`core.hooksPath`, which is where hook managers such as [pre-commit][pc],
+Husky and lefthook install themselves. Git runs config-based hooks alongside
+the hook script, so both run on every commit and push, and those tools can
+install, update or uninstall their hooks without touching devtask's. The
+hook command is the `devtask` found on `PATH` when `devtask init` ran; if
+that moves, run `devtask init` again. To remove the hooks from a
+repository, run `devtask uninstall-git-hook` in it.
 
 The Claude Code hook runs `hooks/guard.py` from the plugin's own copy of
 the repository with the system `python3` (3.11 or newer), so the plugin
@@ -77,6 +87,7 @@ works without the CLI installed.
 
 [uv]: https://docs.astral.sh/uv/
 [hooks]: https://git-scm.com/docs/githooks
+[pc]: https://pre-commit.com
 
 ## Use
 
@@ -85,6 +96,7 @@ cd some-project
 devtask                         # no arguments: list the commands
 devtask info                    # config, directories and guard state
 devtask init                    # set up this repo and turn the guard on
+                                # (or `devtask init --randomize 0.3`: see below)
 claude                          # then: /devtask:plan 1234
 devtask list                    # tasks and how many tags remain
 devtask scan                    # each tag, where it is, and whether it is mapped
@@ -101,7 +113,60 @@ tag is for. After an update, `devtask setup` or the next `devtask init`
 regenerates them. `devtask completions fish` prints them instead.
 
 The guard applies only in repositories where `devtask init` (or
-`devtask guard on`) has run. Everywhere else the plugin does nothing.
+`devtask guard on`) has run, and to tasks that random devtask mode picks.
+Everywhere else the plugin does nothing.
+
+## Random devtask mode
+
+Instead of guarding a whole repository, devtask can hand you a random share
+of new tasks:
+
+```sh
+devtask init --randomize 0.3              # 30% of new tasks, rolled on a new branch
+devtask init --randomize 0.3 -s on_edit   # rolled at Claude's first code edit
+```
+
+devtask rolls once per task. On a hit, that task is in **devtask mode**: the
+guard applies to it, and Claude must tell you before it does anything else.
+If you'd rather not do that task yourself, say so; Claude runs
+`devtask skip`, which asks for your approval. Skipping affects that task
+only. To stop the rolls, run `devtask config randomize off`.
+
+`randomization_strategy` decides when a task starts:
+
+| Strategy | Rolls when | A task is |
+|---|---|---|
+| `on_branch` (default) | Claude creates a branch: with git in Bash, with `EnterWorktree`, or in a Claude Code worktree (`claude --worktree`, subagent `isolation: worktree`) | that branch |
+| `on_edit` | Claude first edits code for a task that hasn't been rolled | the branch, or the Claude session on the default branch or a detached HEAD |
+
+Under `on_edit`, edits to files that match `randomize_ignore` don't start a
+task. By default that is documentation: Markdown and other prose formats,
+`docs/`, `doc/`, `documentation/`, `man/`, and files such as `README*`,
+`CHANGELOG*` and `LICENSE*`. The patterns follow `.gitignore`: without a
+`/` they match a file name at any depth, `**` spans directories, the last
+match wins, and `!` makes a path count as code again. The default, global
+and project lists add up, so a project can make an exception in one line:
+
+```sh
+devtask config randomize_ignore --add '!skills/**/SKILL.md'
+```
+
+### Settings
+
+`devtask config` lists every setting with its value and where the value comes from.
+`devtask config <key>` shows one setting, and `devtask config <key> <value>` sets it.
+Changes go to the project config unless you pass `--global`, and
+`--unset` removes a key so the global value or the default applies again.
+
+| Key | Values | Default |
+|---|---|---|
+| `randomize` | a number from 0 to 1, or `off` | `0` |
+| `randomization_strategy` | `on_branch`, `on_edit` | `on_branch` |
+| `randomize_ignore` | glob patterns (`--add`, `--remove`) | documentation |
+| `tag` | the tag prefix (global only) | `#DEVTASK_` |
+
+A global `randomize` applies only in repositories where `devtask init` has
+run. `devtask info` shows the settings in use and the current branch's state.
 
 ## Tags
 
@@ -127,6 +192,12 @@ accepts tag-only lines, so Claude can't hide code next to a tag.
   The git hook is the backstop for tags, and the skills tell Claude not to
   write code. Neither stops an LLM-written line that you commit yourself.
 - `git commit --no-verify` and `git push --no-verify` skip the git hooks.
+- Random devtask mode only sees what Claude does through its own tools in
+  the repo it's working in. Under `on_branch`, a branch created inside a
+  script, or with `git -C` pointed at another repository, isn't rolled.
+  Each roll is kept by branch name, so a deleted branch that is recreated
+  with the same name keeps its old result, unless the branch is created
+  again during a Claude tool call.
 - Task files describe changes in prose and must not contain code meant to
   be pasted in. Quoting existing code as an example is allowed. These rules
   are in the skill instructions, and nothing enforces them.

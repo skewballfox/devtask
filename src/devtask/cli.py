@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 from typing import NoReturn
 
-from devtask import core
+from devtask import core, mode, settings
 
 HOOK_EVENTS = ("pre-commit", "pre-push")
 
@@ -44,6 +44,13 @@ One section per tag; the heading must contain the tag, for example:
 """
 
 
+def parse_randomize(raw: str) -> float:
+    try:
+        return settings.parse_randomize(raw)
+    except settings.SettingError as e:
+        raise argparse.ArgumentTypeError(str(e)) from e
+
+
 def die(msg: str) -> NoReturn:
     print(f"devtask: {msg}", file=sys.stderr)
     sys.exit(1)
@@ -56,14 +63,26 @@ def current_repo() -> core.Repo:
     return core.Repo.at(root)
 
 
-def cmd_init(_args: argparse.Namespace) -> None:
+def cmd_init(args: argparse.Namespace) -> None:
     repo = current_repo()
     ensure_setup()
+    if not git_hooks_installed(repo):
+        install_git_hooks(repo)
     repo.ensure()
-    repo.guard_file.touch()
+    repo.init_marker.touch()
+    if args.randomize is not None:
+        settings.write_key(repo.config_file, "randomize", args.randomize)
+    if args.strategy is not None:
+        settings.write_key(repo.config_file, "randomization_strategy", args.strategy)
     print(f"tasks: {repo.tasks_dir}")
     print(f"state: {repo.state_dir}")
-    print("guard: on (Claude may only add or remove tag lines in this repo)")
+    if args.randomize is None and args.strategy is None:
+        repo.guard_file.touch()
+        print("guard: on (Claude may only add or remove tag lines in this repo)")
+        return
+    # Random devtask mode: the guard waits for a roll to pick a task.
+    print(f"randomize: {settings.randomize(repo)}, {settings.strategy(repo)}")
+    print("guard:", "on" if repo.guard_enabled() else "off (on for tasks a roll picks)")
 
 
 def cmd_info(_args: argparse.Namespace) -> None:
@@ -78,6 +97,24 @@ def cmd_info(_args: argparse.Namespace) -> None:
     print(f"tasks:  {repo.tasks_dir}")
     print(f"state:  {repo.state_dir}")
     print(f"guard:  {'on' if repo.guard_enabled() else 'off'}")
+    print(f"hooks:  {'installed' if git_hooks_installed(repo) else 'missing or stale'}")
+    p = settings.lookup("randomize", repo)
+    how = settings.lookup("randomization_strategy", repo)
+    print(f"random: {p.value} ({p.source}), {how.value} ({how.source})")
+    if not repo.initialized() and p.value:
+        print("        (not used until `devtask init` runs here)")
+    branch = mode.current_branch(repo.root)
+    record = mode.load_rolls(repo).get(f"branch:{branch}") if branch else None
+    match record:
+        case None:
+            state = "not rolled"
+        case {"skipped": True}:
+            state = "skipped"
+        case {"hit": True}:
+            state = "devtask mode"
+        case _:
+            state = "normal (rolled, missed)"
+    print(f"task:   {branch or '(detached HEAD)'}: {state}")
 
 
 def cmd_path(args: argparse.Namespace) -> None:
@@ -110,6 +147,88 @@ def cmd_new(args: argparse.Namespace) -> None:
             )
         )
     print(task_file)
+
+
+def config_scope(args: argparse.Namespace, key: str) -> tuple[Path, str]:
+    """The config file a `devtask config` change goes to, and its name."""
+    if args.global_:
+        return core.global_config_file(), "global"
+    if settings.SETTINGS[key].global_only:
+        die(f"{key} is global-only; pass --global")
+    return current_repo().config_file, "project"
+
+
+def cmd_config(args: argparse.Namespace) -> None:
+    root = core.repo_root(Path.cwd())
+    repo = core.Repo.at(root) if root else None
+    if args.key is None:
+        for key, setting in settings.SETTINGS.items():
+            if setting.parse is None:
+                n = len(settings.ignore_patterns(repo))
+                print(f"{key}: {n} patterns (devtask config {key} lists them)")
+            else:
+                v = settings.lookup(key, repo)
+                print(f"{key}: {v.value} ({v.source})")
+        return
+    setting = settings.SETTINGS[args.key]
+    edits = [args.add, args.remove, args.unset]
+    if setting.parse is None:
+        if args.value is not None:
+            die(f"{args.key} is a list; change it with --add or --remove")
+        if not any(edits):
+            for pattern, source in settings.ignore_patterns(repo):
+                print(f"{pattern}\t({source})")
+            return
+        path, scope = config_scope(args, args.key)
+        current = list(core.read_toml(path).get(args.key, []))
+        if args.unset:
+            settings.write_key(path, args.key, None)
+            print(f"removed {args.key} from the {scope} config")
+            return
+        if args.add:
+            current += [p for p in args.add if p not in current]
+        if args.remove:
+            missing = [p for p in args.remove if p not in current]
+            if missing:
+                die(f"not in the {scope} {args.key}: {', '.join(missing)}")
+            current = [p for p in current if p not in args.remove]
+        settings.write_key(path, args.key, current)
+        print(f"{args.key} ({scope}): {current}")
+        return
+    if args.add or args.remove:
+        die(f"{args.key} is not a list; give a value instead")
+    if args.value is None and not args.unset:
+        v = settings.lookup(args.key, repo)
+        print(f"{v.value} ({v.source})")
+        return
+    path, scope = config_scope(args, args.key)
+    if args.unset:
+        settings.write_key(path, args.key, None)
+        print(f"removed {args.key} from the {scope} config")
+        return
+    try:
+        value = setting.parse(args.value)
+    except settings.SettingError as e:
+        die(str(e))
+    settings.write_key(path, args.key, value)
+    print(f"{args.key} = {value} ({scope})")
+
+
+def cmd_skip(args: argparse.Namespace) -> None:
+    """Opt one task out of devtask mode; random devtask mode stays on."""
+    repo = current_repo()
+    rolls = mode.load_rolls(repo)
+    key = args.key
+    if key is None:
+        branch = mode.current_branch(repo.root)
+        key = f"branch:{branch}" if branch else None
+    if key is None or not mode.active(rolls.get(key)):
+        on = [k for k, r in rolls.items() if mode.active(r)]
+        hint = f"; in devtask mode: {', '.join(on)}" if on else ""
+        die(f"{key or 'this checkout'} is not in devtask mode{hint}")
+    mode.skip(repo, key)
+    print(f"devtask mode skipped for {mode.describe(key).replace('`', '')}")
+    print("random devtask mode stays on; `devtask config randomize off` turns it off")
 
 
 def known_ids(repo: core.Repo, prefix: str) -> set[str]:
@@ -245,32 +364,55 @@ def hook_command(event: str) -> str:
     return f"{base} git-hook {event}"
 
 
-def git_hooks_installed() -> bool:
-    """True when every global hook is configured with the current command."""
+# The hooks are config-based (`hook.<name>.event` and `.command`) in the repo's
+# own config, never a script in the hooks directory or a `core.hooksPath`
+# setting. Git runs them alongside whatever pre-commit, Husky, lefthook and
+# similar tools install there, and those tools never see or overwrite them.
+
+
+def git_hooks_installed(repo: core.Repo) -> bool:
+    """True when every repo hook is configured with the current command."""
+
+    def local(key: str) -> str | None:
+        return core.git("config", "--local", "--get", key, cwd=repo.root)
+
     return all(
-        core.git("config", "--global", "--get", f"hook.devtask-{event}.event") == event
-        and core.git("config", "--global", "--get", f"hook.devtask-{event}.command")
-        == hook_command(event)
+        local(f"hook.devtask-{event}.event") == event
+        and local(f"hook.devtask-{event}.command") == hook_command(event)
         for event in HOOK_EVENTS
     )
 
 
-def install_git_hooks() -> None:
+def install_git_hooks(repo: core.Repo) -> None:
     for event in HOOK_EVENTS:
         name = f"devtask-{event}"
-        core.git("config", "--global", f"hook.{name}.event", event)
-        core.git("config", "--global", f"hook.{name}.command", hook_command(event))
-        print(f"installed global {event} hook: {name}")
+        core.git("config", "--local", f"hook.{name}.event", event, cwd=repo.root)
+        core.git("config", "--local", f"hook.{name}.command", hook_command(event), cwd=repo.root)
+        print(f"installed {event} hook: {name}")
+
+
+def remove_global_git_hooks() -> bool:
+    """Remove the global hooks older versions installed. Returns whether any were."""
+    removed = False
+    for event in HOOK_EVENTS:
+        if core.git("config", "--global", "--remove-section", f"hook.devtask-{event}") is not None:
+            print(f"removed old global {event} hook: devtask-{event}")
+            removed = True
+    return removed
 
 
 def cmd_install_git_hook(_args: argparse.Namespace) -> None:
-    install_git_hooks()
+    install_git_hooks(current_repo())
 
 
 def cmd_uninstall_git_hook(_args: argparse.Namespace) -> None:
+    repo = current_repo()
     for event in HOOK_EVENTS:
-        core.git("config", "--global", "--remove-section", f"hook.devtask-{event}")
-        print(f"removed global {event} hook: devtask-{event}")
+        name = f"devtask-{event}"
+        if core.git("config", "--local", "--remove-section", f"hook.{name}", cwd=repo.root) is None:
+            print(f"no {event} hook to remove: {name}")
+        else:
+            print(f"removed {event} hook: {name}")
 
 
 def cmd_git_hook(args: argparse.Namespace) -> None:
@@ -301,6 +443,9 @@ def cmd_git_hook(args: argparse.Namespace) -> None:
 
 def cmd_complete(args: argparse.Namespace) -> None:
     """Print `value<TAB>description` lines for the fish completions."""
+    if args.kind.startswith("config-"):
+        complete_config(args.kind, args.words)
+        return
     root = core.repo_root(Path.cwd())
     if root is None:
         return
@@ -315,6 +460,23 @@ def cmd_complete(args: argparse.Namespace) -> None:
             for tag_id in sorted(known_ids(repo, prefix)):
                 section = sections.get(tag_id)
                 print(f"{tag_id}\t{section.title if section else 'unmapped'}")
+        case "rolls":
+            for key, record in mode.load_rolls(repo).items():
+                if mode.active(record):
+                    print(f"{key}\tdevtask mode since {record.get('at', '?')}")
+
+
+def complete_config(kind: str, words: list[str]) -> None:
+    """Config keys until one is typed, then that key's values."""
+    after = words[words.index("config") + 1 :] if "config" in words else []
+    key = next((w for w in after if w in settings.SETTINGS), None)
+    match kind, key:
+        case "config-keys", None:
+            for name, setting in settings.SETTINGS.items():
+                print(f"{name}\t{setting.help}")
+        case "config-values", str(name):
+            for choice in settings.SETTINGS[name].choices:
+                print(choice)
 
 
 def fish_quote(s: str) -> str:
@@ -340,7 +502,7 @@ def fish_script(parser: argparse.ArgumentParser) -> str:
                 continue
             match COMPLETE.get(action), action.choices:
                 case str(kind), _:
-                    values = f" -a {fish_quote(f'(devtask _complete {kind})')}"
+                    values = f" -a {fish_quote(f'(devtask _complete {kind} (commandline -opc))')}"
                 case None, [*choices]:
                     values = f" -a {fish_quote(' '.join(choices))}"
                 case _:
@@ -386,12 +548,10 @@ def cmd_completions(args: argparse.Namespace) -> None:
 
 
 def ensure_setup() -> bool:
-    """Install the git hooks, and fish completions if fish is present, when
-    either is missing or stale. Returns whether anything was installed."""
-    changed = False
-    if not git_hooks_installed():
-        install_git_hooks()
-        changed = True
+    """Install fish completions, if fish is present, when they are missing or
+    stale, and remove global git hooks left by older versions. Returns whether
+    anything changed."""
+    changed = remove_global_git_hooks()
     if shutil.which("fish") and not completions_current():
         install_completions()
         changed = True
@@ -400,7 +560,7 @@ def ensure_setup() -> bool:
 
 def cmd_setup(_args: argparse.Namespace) -> None:
     if not ensure_setup():
-        print("git hooks and completions are already up to date")
+        print("completions are already up to date")
 
 
 @functools.cache
@@ -412,7 +572,16 @@ def build_parser() -> argparse.ArgumentParser:
         kwargs = {"help": help_text, "description": help_text} if help_text else {}
         return sub.add_parser(name, **kwargs)
 
-    command("init", "set up this repo and turn the guard on")
+    p = command("init", "set up this repo and turn the guard on")
+    p.add_argument(
+        "--randomize",
+        type=parse_randomize,
+        metavar="P",
+        help="instead of the guard, put each new task in devtask mode with chance P (0 to 1)",
+    )
+    p.add_argument(
+        "-s", "--strategy", choices=settings.STRATEGIES, help="when to roll (default on_branch)"
+    )
     command("info", "show config, directories and guard state")
     p = command("path", "print this repo's task directory")
     p.add_argument("--state", action="store_true", help="print the state directory instead")
@@ -434,9 +603,20 @@ def build_parser() -> argparse.ArgumentParser:
     COMPLETE[p.add_argument("--task", help="remove every tag of this task")] = "tasks"
     p.add_argument("--all", action="store_true", help="remove every tag")
     p.add_argument("--dry-run", action="store_true", help="only report what would go")
-    command("setup", "install the git hooks and fish completions if needed")
-    command("install-git-hook", "add the global pre-commit/pre-push check")
-    command("uninstall-git-hook", "remove the global pre-commit/pre-push check")
+    p = command("config", "show or change settings")
+    COMPLETE[p.add_argument("key", nargs="?", choices=tuple(settings.SETTINGS), help="setting")] = (
+        "config-keys"
+    )
+    COMPLETE[p.add_argument("value", nargs="?", help="new value")] = "config-values"
+    p.add_argument("--global", dest="global_", action="store_true", help="change the global config")
+    p.add_argument("--add", nargs="+", metavar="PATTERN", help="add to a list setting")
+    p.add_argument("--remove", nargs="+", metavar="PATTERN", help="remove from a list setting")
+    p.add_argument("--unset", action="store_true", help="remove the setting from that config")
+    p = command("skip", "opt the current task out of devtask mode")
+    COMPLETE[p.add_argument("key", nargs="?", help="task key (default: this branch)")] = "rolls"
+    command("setup", "install fish completions if needed")
+    command("install-git-hook", "add the pre-commit/pre-push check to this repo")
+    command("uninstall-git-hook", "remove the pre-commit/pre-push check from this repo")
     p = command("completions", "print fish completions")
     p.add_argument("shell", nargs="?", choices=("fish",), default="fish", help="target shell")
     p.add_argument("--install", action="store_true", help="write them to fish's completions dir")
@@ -446,7 +626,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("event", choices=HOOK_EVENTS)
     p.add_argument("hook_args", nargs="*")
     p = command("_complete")
-    p.add_argument("kind", choices=("ids", "tasks"))
+    p.add_argument("kind", choices=("ids", "tasks", "rolls", "config-keys", "config-values"))
+    p.add_argument("words", nargs="*")
     return parser
 
 

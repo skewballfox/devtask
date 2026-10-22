@@ -61,7 +61,11 @@ jobs:
 
           devtask init
           devtask completions fish > /dev/null
-          git config --global --get hook.devtask-pre-commit.command
+          git config --local --get hook.devtask-pre-commit.command
+          if git config --global --get hook.devtask-pre-commit.command; then
+            echo "::error::devtask init installed a global hook"
+            exit 1
+          fi
 
           printf '// #DEVTASK_ci-1\nfn main() {}\n' > main.rs
           git add main.rs
@@ -69,12 +73,68 @@ jobs:
             echo "::error::the pre-commit check let a tag through"
             exit 1
           fi
+          # Git itself must run it, alongside a hooks-directory script like pre-commit's.
+          printf '#!/bin/sh\ntouch "$(git rev-parse --git-dir)/script-ran"\n' > .git/hooks/pre-commit
+          chmod +x .git/hooks/pre-commit
+          if git commit -qm tagged; then
+            echo "::error::git committed a tag"
+            exit 1
+          fi
+          test -e .git/script-ran
 
           # The plugin runs the guard with the system python3, so test it that way.
           input=$(jq -n --arg cwd "$repo" \
             '{tool_name: "Write", cwd: $cwd, tool_input: {file_path: "main.rs", content: "x"}}')
           echo "$input" | python3 "$GITHUB_WORKSPACE/hooks/guard.py" pre-tool-use \
             | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
+
+      - name: Smoke-test random devtask mode
+        run: |
+          export PATH="$GITHUB_WORKSPACE/.venv/bin:$PATH"
+          export HOME="$RUNNER_TEMP/home2" GIT_CONFIG_GLOBAL="$RUNNER_TEMP/gitconfig2"
+          mkdir -p "$HOME"
+          git config --global user.name ci
+          git config --global user.email ci@example.com
+          git config --global init.defaultBranch main
+
+          repo="$RUNNER_TEMP/repo2"
+          git init -q "$repo" && cd "$repo"
+          mkdir src && echo 'fn main() {}' > src/a.rs && echo hi > README.md
+          git add -A && git commit -qm init
+          guard() { python3 "$GITHUB_WORKSPACE/hooks/guard.py" "$@"; }
+          call() {  # tool, tool_input, tool_use_id
+            jq -nc --arg t "$1" --argjson i "$2" --arg id "$3" --arg cwd "$repo" \
+              '{tool_name: $t, tool_input: $i, tool_use_id: $id, cwd: $cwd, session_id: "s1"}'
+          }
+          code_edit='{"file_path": "src/a.rs", "old_string": "fn main() {}", "new_string": "fn main() { x }"}'
+
+          # The guard stays off; rolls decide. Project settings beat global ones.
+          devtask init --randomize 1
+          test ! -e "$(devtask path --state)/guard"
+          devtask config --global randomize 0
+          test "$(devtask config randomize)" = "1.0 (project)"
+
+          # on_branch (default): a new branch rolls after the tool call.
+          call Bash '{"command": "git switch -c feat"}' b1 | guard pre-tool-use
+          git switch -qc feat
+          call Bash '{"command": "git switch -c feat"}' b1 | guard post-tool-use \
+            | jq -e '.hookSpecificOutput.additionalContext | contains("devtask mode is now ON")'
+          call Edit "$code_edit" e1 | guard pre-tool-use \
+            | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
+          git switch -q main
+          test -z "$(call Edit "$code_edit" e2 | guard pre-tool-use)"
+
+          # Opting a task out needs the user's approval.
+          call Bash '{"command": "devtask skip branch:feat"}' s1 | guard pre-tool-use \
+            | jq -e '.hookSpecificOutput.permissionDecision == "ask"'
+
+          # on_edit: the first code edit rolls; docs edits don't.
+          devtask config randomization_strategy on_edit
+          git switch -qc ed
+          test -z "$(call Edit '{"file_path": "README.md", "old_string": "hi", "new_string": "yo"}' e3 \
+            | guard pre-tool-use)"
+          call Edit "$code_edit" e4 | guard pre-tool-use \
+            | jq -e '.hookSpecificOutput.permissionDecisionReason | contains("devtask mode is now ON")'
 
       - name: Preview the next release
         if: matrix.python == '3.14'

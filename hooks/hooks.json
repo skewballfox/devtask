@@ -1,5 +1,5 @@
 {
-  "description": "In repos where `devtask init` turned the guard on, limits Claude's edits to adding or removing devtask tag lines and tells it so at session start.",
+  "description": "In repos or tasks where devtask is on, limits Claude's edits to adding or removing devtask tag lines and tells it so. With `randomize` set, rolls new tasks into devtask mode.",
   "hooks": {
     "SessionStart": [
       {
@@ -14,11 +14,23 @@
     ],
     "PreToolUse": [
       {
-        "matcher": "Edit|MultiEdit|Write|NotebookEdit|Bash",
+        "matcher": "Edit|MultiEdit|Write|NotebookEdit|Bash|EnterWorktree",
         "hooks": [
           {
             "type": "command",
             "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/guard.py\" pre-tool-use",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash|EnterWorktree",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/guard.py\" post-tool-use",
             "timeout": 10
           }
         ]
