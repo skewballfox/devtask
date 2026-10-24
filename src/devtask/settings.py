@@ -17,6 +17,7 @@ from pathlib import Path, PurePosixPath
 from devtask import core
 
 STRATEGIES = ("on_branch", "on_edit")
+PLUGIN_SCOPES = ("local", "project")
 
 # Paths that are documentation only. Edits to them never start a task.
 DEFAULT_IGNORE = [
@@ -54,6 +55,21 @@ def parse_strategy(raw: str) -> str:
     return raw
 
 
+def parse_bool(raw: str) -> bool:
+    match raw.lower():
+        case "true" | "on" | "yes":
+            return True
+        case "false" | "off" | "no":
+            return False
+    raise SettingError(f"expected true or false (got {raw!r})")
+
+
+def parse_plugin_scope(raw: str) -> str:
+    if raw not in PLUGIN_SCOPES:
+        raise SettingError(f"plugin_scope must be one of {', '.join(PLUGIN_SCOPES)}")
+    return raw
+
+
 def parse_tag(raw: str) -> str:
     if not raw or raw.isspace():
         raise SettingError("tag must not be empty")
@@ -81,6 +97,18 @@ SETTINGS: dict[str, Setting] = {
         STRATEGIES,
     ),
     "randomize_ignore": Setting("paths whose edits never start a task", DEFAULT_IGNORE),
+    "git_exclude": Setting(
+        "list the files devtask init writes in .git/info/exclude",
+        True,
+        parse_bool,
+        ("true", "false"),
+    ),
+    "plugin_scope": Setting(
+        "where devtask init enables the Claude Code plugin",
+        "local",
+        parse_plugin_scope,
+        PLUGIN_SCOPES,
+    ),
 }
 
 
@@ -127,6 +155,11 @@ def randomize(repo: core.Repo) -> float:
 def strategy(repo: core.Repo) -> str:
     value = lookup("randomization_strategy", repo).value
     return value if isinstance(value, str) and value in STRATEGIES else "on_branch"
+
+
+def plugin_scope(repo: core.Repo) -> str:
+    value = lookup("plugin_scope", repo).value
+    return value if isinstance(value, str) and value in PLUGIN_SCOPES else "local"
 
 
 # Patterns follow .gitignore: without a "/" they match the file name at any

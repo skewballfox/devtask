@@ -5,12 +5,15 @@ comment holding a tag (`// #DEVTASK_pr123-1`) and described in a task file
 kept outside the repository. Nothing here writes code; it only finds,
 validates and removes tag lines and locates devtask's files.
 
-Nothing is stored in the working tree; the CLI only adds its git hook
-entries to the repo's config. Other files follow the XDG Base Directory
-spec, honoring XDG_CONFIG_HOME, XDG_DATA_HOME and XDG_STATE_HOME:
+In the working tree, `devtask init` only writes CLAUDE.local.md and
+.claude/settings.local.json (see LOCAL_FILES), listing each one in the repo's
+info/exclude. In .git it adds its git hook entries to the repo's config. Other
+files follow the XDG Base Directory spec, honoring XDG_CONFIG_HOME,
+XDG_DATA_HOME and XDG_STATE_HOME:
 
     $XDG_CONFIG_HOME/devtask/config.toml           global settings
     $XDG_DATA_HOME/devtask/repos/<repo>/config.toml project settings (override global)
+    $XDG_DATA_HOME/devtask/repos/<repo>/rules.md    rules CLAUDE.local.md imports
     $XDG_DATA_HOME/devtask/repos/<repo>/tasks/      task files
     $XDG_STATE_HOME/devtask/repos/<repo>/           guard flag, rolls, repo info
 """
@@ -36,8 +39,9 @@ _LEADERS = r"(?://+|#+|--|;+|%+|/\*+|<!--|\{-|\(\*|'|\"|REM\b|!)"
 _CLOSERS = r"(?:\*+/|-->|-\}|\*\))"
 
 
-def git(*args: str, cwd: Path | None = None) -> str | None:
-    """Run git and return stripped stdout, or None when it fails."""
+def git(*args: str, cwd: Path | None = None, strip: bool = True) -> str | None:
+    """Run git and return stdout (stripped unless `strip` is false, for output
+    whose leading whitespace matters), or None when it fails."""
     try:
         out = subprocess.run(
             ["git", *args],
@@ -48,7 +52,7 @@ def git(*args: str, cwd: Path | None = None) -> str | None:
         )
     except (subprocess.CalledProcessError, FileNotFoundError, NotADirectoryError):
         return None
-    return out.stdout.strip()
+    return out.stdout.strip() if strip else out.stdout
 
 
 def xdg_base(var: str, default: Path) -> Path:
@@ -187,6 +191,61 @@ class Repo:
 
     def task_files(self) -> list[Path]:
         return sorted(self.tasks_dir.glob("*.md"))
+
+    @property
+    def rules_file(self) -> Path:
+        """Rules for Claude in this repo, imported by its CLAUDE.local.md."""
+        return self.data_dir / "rules.md"
+
+    @property
+    def main_root(self) -> Path:
+        """The main checkout. Claude Code reads its .claude/settings.local.json
+        in linked worktrees too. A bare repo has none, so this is `root` there."""
+        common = git("rev-parse", "--path-format=absolute", "--git-common-dir", cwd=self.root)
+        if common and Path(common).name == ".git":
+            return Path(common).parent
+        return self.root
+
+    @property
+    def exclude_file(self) -> Path:
+        """The repo's untracked ignore list, shared by all of its worktrees."""
+        common = git("rev-parse", "--path-format=absolute", "--git-common-dir", cwd=self.root)
+        return Path(common or self.root / ".git") / "info" / "exclude"
+
+
+# Files `devtask init` may write to a worktree, relative to its root.
+LOCAL_FILES = ("CLAUDE.local.md", ".claude/settings.local.json")
+EXCLUDE_HEADER = "# devtask"
+
+
+def set_excluded(repo: Repo, rel_paths: list[str], on: bool) -> list[str]:
+    """Add (`on`) or remove a `/<path>` line for each of these files in the
+    repo's info/exclude. Lines live in a block under devtask's header and name
+    single files, never a directory, so files a project adds next to them
+    (say, in .claude/) stay visible to git. Returns the paths that changed."""
+    path = repo.exclude_file
+    lines = path.read_text().splitlines() if path.exists() else []
+    ours: list[str] = []
+    start = len(lines)
+    if EXCLUDE_HEADER in lines:
+        start = end = lines.index(EXCLUDE_HEADER)
+        end += 1
+        while end < len(lines) and lines[end].removeprefix("/") in LOCAL_FILES:
+            ours.append(lines[end].removeprefix("/"))
+            end += 1
+        del lines[start:end]
+    if on:
+        changed = [p for p in rel_paths if p not in ours and f"/{p}" not in lines]
+        ours += changed
+    else:
+        changed = [p for p in ours if p in rel_paths]
+        ours = [p for p in ours if p not in rel_paths]
+    if changed:
+        if ours:
+            lines[start:start] = [EXCLUDE_HEADER, *(f"/{p}" for p in sorted(ours))]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("".join(f"{line}\n" for line in lines))
+    return sorted(changed)
 
 
 def section_re(prefix: str) -> re.Pattern[str]:

@@ -61,3 +61,13 @@ example is fine, but nothing the user could paste in.
 If they want it, append a dated `### Review` note under the relevant
 sections of the task file. Run `devtask strip <ID>` only when they ask you
 to remove tags.
+
+## 4. Record the review (review-gate)
+
+If `devtask policy` shows `review-gate` as on, run `devtask reviewed <task>`
+as the very last step, after the report. It records the exact content you
+reviewed. Commits are refused until every staged file matches a recorded
+review. The user approves the command, so say in one line what it records.
+Run it only at the end of a review, and run it even when the review found
+problems: it marks the content as reviewed, not as approved. If the user
+changes anything afterwards, another review is needed before they can commit.

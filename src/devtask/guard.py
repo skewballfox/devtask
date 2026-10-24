@@ -3,9 +3,11 @@
 The guard applies to a whole repo after `devtask init` or `devtask guard on`,
 and to one task when random devtask mode picks it (see `devtask.mode`).
 
-`session-start` tells Claude the guard is on. `pre-tool-use` denies file edits
-that change anything but tag-only lines, and Bash commands that look like they
-write to the repo. The Bash check is a heuristic; the git hook is the backstop.
+`session-start` tells Claude the guard is on and which policies apply.
+`pre-tool-use` denies Bash commands an enabled policy forbids (see
+`devtask.policy`). Under the guard it also denies file edits that change
+anything but tag-only lines, and Bash commands that look like they write to
+the repo. The Bash check is a heuristic; the git hook is the backstop.
 It also rolls for random devtask mode (`on_edit`, or a Claude Code worktree)
 and has the user approve devtask commands that turn devtask off.
 `post-tool-use` rolls for branches a tool call created (`on_branch`).
@@ -18,7 +20,7 @@ import re
 import sys
 from pathlib import Path, PurePosixPath
 
-from devtask import core, mode, settings
+from devtask import core, mode, policy, settings
 
 FILE_TOOLS = {"Edit", "MultiEdit", "Write", "NotebookEdit"}
 BRANCH_TOOLS = {"Bash", "EnterWorktree"}
@@ -55,7 +57,7 @@ _REDIRECT = re.compile(r"(?<![0-9&<>])>>?\s*(?!&)([^\s;|&)]+)")
 # devtask commands that switch devtask off for a task or a repo. The user
 # approves each one, so Claude can't opt out of what the user asked for.
 _NEEDS_USER = re.compile(
-    r"\bdevtask\s+(?:skip\b|guard\s+off\b|config\s+\S+\s+\S"
+    r"\bdevtask\s+(?:skip\b|guard\s+off\b|uninstall\b|policy\s+rm\b|reviewed\b|config\s+\S+\s+\S"
     r"|init\b[^;&|]*\s(?:--randomize|-s\b|--strategy))"
 )
 
@@ -171,6 +173,15 @@ def check_bash(inp: dict, cwd: str, session_id: str | None) -> None:
     repo = repo_for(Path(cwd))
     if repo is None:
         return
+    if hit := policy.denied(repo, cmd):
+        name, why = hit
+        decide(
+            "deny",
+            f"devtask policy {name}: this command {why} (`{cmd.strip()[:80]}`). The user "
+            f"turned this policy on so that they do this themselves; don't work around it "
+            f"with another tool or command. Ask the user instead. Run "
+            f"`devtask policy rm {name}` only if the user tells you to.",
+        )
     if re.match(r"\s*devtask\b", cmd) and not re.search(r"[;&|]", cmd):
         return
     writes = [(why, edits) for pattern, why, edits in _BASH_DENY if re.search(pattern, cmd)]
@@ -231,7 +242,15 @@ def session_start(data: dict) -> None:
     repo = repo_for(Path(data.get("cwd", ".")))
     if repo is None:
         return
-    session_id = data.get("session_id")
+    context = guard_context(repo, data.get("session_id"))
+    policies = policy.session_context(repo)
+    text = "\n\n".join(part for part in (context, policies) if part)
+    if text:
+        emit("SessionStart", additionalContext=text)
+
+
+def guard_context(repo: core.Repo, session_id: str | None) -> str:
+    """What Claude needs to know at session start about the edit guard."""
     prefix = core.tag_prefix()
     if (
         settings.randomize(repo) > 0
@@ -239,11 +258,10 @@ def session_start(data: dict) -> None:
         and not repo.guard_enabled()
         and (key := mode.roll_claude_worktree(repo))
     ):
-        emit("SessionStart", additionalContext=mode.activation_message(key))
-        return
+        return mode.activation_message(key)
     guarded, task_key = guard_state(repo, session_id)
     if not guarded:
-        return
+        return ""
     if task_key:
         intro = (
             f"devtask mode is ON for the current task ({mode.describe(task_key)}). "
@@ -257,7 +275,7 @@ def session_start(data: dict) -> None:
             "they want to write the code in this repository themselves. Respect "
             "that: "
         )
-    emit("SessionStart", additionalContext=intro + guard_rules(prefix))
+    return intro + guard_rules(prefix)
 
 
 def main() -> None:
